@@ -15,18 +15,18 @@ logging.basicConfig(
 log = logging.getLogger("monitor3d")
 
 # ── Configurações vindas do run.sh (interface do add-on) ─────
-GEMINI_API_KEY      = os.environ["GEMINI_API_KEY"]
-CAMERA_ENTITY       = os.environ["CAMERA_ENTITY"]
-INTERVALO_MINUTOS   = int(os.environ.get("INTERVALO_MINUTOS", 2))
-SEVERIDADE_ALERTA   = os.environ.get("SEVERIDADE_ALERTA", "media")
-TELEGRAM_BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID    = os.environ["TELEGRAM_CHAT_ID"]
-OCTOPRINT_URL       = os.environ["OCTOPRINT_URL"].rstrip("/")
-OCTOPRINT_API_KEY   = os.environ["OCTOPRINT_API_KEY"]
-PAUSAR_EM_FALHA_ALTA= os.environ.get("PAUSAR_EM_FALHA_ALTA", "true").lower() == "true"
-OCTOPRINT_ENTITY    = os.environ.get("OCTOPRINT_ENTITY", "sensor.octoprint_current_state")
-HA_TOKEN            = os.environ["HA_TOKEN"]
-HA_URL              = os.environ.get("HA_URL", "http://supervisor/core")
+GEMINI_API_KEY       = os.environ["GEMINI_API_KEY"]
+CAMERA_ENTITY        = os.environ["CAMERA_ENTITY"]
+INTERVALO_MINUTOS    = int(os.environ.get("INTERVALO_MINUTOS", 2))
+SEVERIDADE_ALERTA    = os.environ.get("SEVERIDADE_ALERTA", "media")
+TELEGRAM_BOT_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID     = os.environ["TELEGRAM_CHAT_ID"]
+OCTOPRINT_URL        = os.environ["OCTOPRINT_URL"].rstrip("/")
+OCTOPRINT_API_KEY    = os.environ["OCTOPRINT_API_KEY"]
+PAUSAR_EM_FALHA_ALTA = os.environ.get("PAUSAR_EM_FALHA_ALTA", "true").lower() == "true"
+OCTOPRINT_ENTITY     = os.environ.get("OCTOPRINT_ENTITY", "sensor.octoprint_current_state")
+HA_TOKEN             = os.environ["HA_TOKEN"]
+HA_URL               = os.environ.get("HA_URL", "http://supervisor/core")
 
 SEVERIDADE_ORDEM = {"baixa": 1, "media": 2, "alta": 3}
 
@@ -61,6 +61,120 @@ Responda APENAS em JSON válido, sem markdown, sem explicações fora do JSON:
 
 Se não houver falhas, retorne "impressao_ok": true e "falhas": [].
 """
+
+# ── Sensores criados no HA ────────────────────────────────────
+SENSORES = {
+    "sensor.impressao_3d_status":         None,
+    "sensor.impressao_3d_ultima_falha":   None,
+    "sensor.impressao_3d_severidade":     None,
+    "sensor.impressao_3d_ultima_analise": None,
+    "sensor.impressao_3d_total_falhas":   None,
+    "sensor.impressao_3d_resumo":         None,
+}
+
+
+def atualizar_sensor(entity_id: str, state: str, attributes: dict = None) -> None:
+    """Cria ou atualiza um sensor no Home Assistant via API REST."""
+    url = f"{HA_URL}/api/states/{entity_id}"
+    headers = {
+        "Authorization": f"Bearer {HA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "state": str(state),
+        "attributes": attributes or {},
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        if resp.status_code in (200, 201):
+            log.info(f"Sensor atualizado: {entity_id} = {state}")
+        else:
+            log.error(f"Erro ao atualizar sensor {entity_id}: {resp.status_code} {resp.text}")
+    except Exception as e:
+        log.error(f"Erro ao atualizar sensor {entity_id}: {e}")
+
+
+def atualizar_sensores_ha(analise: dict) -> None:
+    """Atualiza todos os sensores no HA com base na análise."""
+    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    falhas = analise.get("falhas", [])
+    impressao_ok = analise.get("impressao_ok", True)
+    resumo = analise.get("resumo", "")
+
+    # Status geral
+    status = "OK" if impressao_ok else "Falha detectada"
+    atualizar_sensor(
+        "sensor.impressao_3d_status",
+        status,
+        {
+            "friendly_name": "Impressão 3D — Status",
+            "icon": "mdi:printer-3d" if impressao_ok else "mdi:printer-3d-nozzle-alert",
+        },
+    )
+
+    # Última falha detectada
+    ultima_falha = falhas[0].get("tipo", "Nenhuma") if falhas else "Nenhuma"
+    atualizar_sensor(
+        "sensor.impressao_3d_ultima_falha",
+        ultima_falha,
+        {
+            "friendly_name": "Impressão 3D — Última Falha",
+            "icon": "mdi:alert-circle-outline",
+            "todas_falhas": [f.get("tipo") for f in falhas],
+        },
+    )
+
+    # Severidade
+    severidade = falhas[0].get("severidade", "nenhuma") if falhas else "nenhuma"
+    atualizar_sensor(
+        "sensor.impressao_3d_severidade",
+        severidade,
+        {
+            "friendly_name": "Impressão 3D — Severidade",
+            "icon": "mdi:alert",
+        },
+    )
+
+    # Última análise (timestamp)
+    atualizar_sensor(
+        "sensor.impressao_3d_ultima_analise",
+        agora,
+        {
+            "friendly_name": "Impressão 3D — Última Análise",
+            "icon": "mdi:clock-check-outline",
+            "device_class": "timestamp",
+        },
+    )
+
+    # Total de falhas detectadas
+    atualizar_sensor(
+        "sensor.impressao_3d_total_falhas",
+        len(falhas),
+        {
+            "friendly_name": "Impressão 3D — Total de Falhas",
+            "icon": "mdi:counter",
+            "unit_of_measurement": "falhas",
+        },
+    )
+
+    # Resumo da análise
+    atualizar_sensor(
+        "sensor.impressao_3d_resumo",
+        resumo[:255] if resumo else "Sem dados",
+        {
+            "friendly_name": "Impressão 3D — Resumo",
+            "icon": "mdi:text-box-outline",
+            "detalhes": [
+                {
+                    "tipo": f.get("tipo"),
+                    "severidade": f.get("severidade"),
+                    "descricao": f.get("descricao"),
+                    "recomendacao": f.get("recomendacao"),
+                }
+                for f in falhas
+            ],
+        },
+    )
 
 
 def capturar_snapshot() -> bytes:
@@ -174,6 +288,9 @@ def ciclo_analise() -> None:
         imagem = capturar_snapshot()
         analise = analisar_com_gemini(imagem)
         falhas = analise.get("falhas", [])
+
+        # Sempre atualiza os sensores, independente de ter falha ou não
+        atualizar_sensores_ha(analise)
 
         if not analise.get("impressao_ok", True) and falhas and deve_alertar(falhas):
             pausado = False
